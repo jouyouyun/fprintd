@@ -27,6 +27,7 @@
 #include <string.h>
 #include <syslog.h>
 
+#include <gio/gio.h>
 #include <glib/gi18n-lib.h>
 #include <dbus/dbus-glib-bindings.h>
 #include <dbus/dbus-glib-lowlevel.h>
@@ -457,6 +458,55 @@ static int do_auth(pam_handle_t *pamh, const char *username)
 	return ret;
 }
 
+static gboolean
+is_local_session(pam_handle_t *pamh)
+{
+        GDBusProxy *proxy;
+        GError *error = NULL;
+        GVariant *variant = NULL;
+    
+        proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM,
+                                              G_DBUS_PROXY_FLAGS_DO_NOT_CONNECT_SIGNALS,
+                                              NULL,
+                                              "org.freedesktop.login1",
+                                              "/org/freedesktop/login1/session/self",
+                                              "org.freedesktop.DBus.Properties",
+                                              NULL, &error);
+        if (error) {
+                D(pamh, "Failed to connect login1: %s", error->message);
+                g_error_free(error);
+                return TRUE;
+        }
+    
+        variant = g_dbus_proxy_call_sync(proxy, "Get",
+                                         g_variant_new("(ss)",
+                                                       "org.freedesktop.login1.Session",
+                                                       "RemoteHost"),
+                                         G_DBUS_CALL_FLAGS_NONE,
+                                         10, NULL, &error);
+        g_object_unref(proxy);
+        if (error) {
+                D(pamh, "Failed to connect login1: %s", error->message);
+                g_error_free(error);
+                return TRUE;
+        }
+    
+        GVariant *tmp = NULL;
+        g_variant_get(variant, "(v)", &tmp);
+        g_variant_unref(variant);
+        if (!tmp) {
+                D(pamh, "Failed to get variant!");
+                return TRUE;
+        }
+    
+        gsize length = 0;
+        const char *rhost = g_variant_get_string(tmp, &length);
+        D(pamh, "RemoteHost: %s, len: %lu\n", rhost, length);
+        g_variant_unref(tmp);
+    
+        return (length == 0);
+}
+
 PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc,
 				   const char **argv)
 {
@@ -476,7 +526,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc,
 					   G_TYPE_NONE, G_TYPE_STRING, G_TYPE_BOOLEAN, G_TYPE_INVALID);
 
 	pam_get_item(pamh, PAM_RHOST, (const void **)(const void*) &rhost);
-	if (rhost != NULL && strlen(rhost) > 0) {
+	if ((rhost != NULL && strlen(rhost) > 0) || !is_local_session(pamh)) {
 		/* remote login (e.g. over SSH) */
 		return PAM_AUTHINFO_UNAVAIL;
 	}
